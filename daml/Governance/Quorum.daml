@@ -1,0 +1,30 @@
+module Governance.Quorum where
+
+template QuorumCheck
+  with
+    proposalId   : Text
+    proposer     : Party
+    voters       : [Party]
+    quorumPct    : Int
+    forVotes     : Int
+    againstVotes : Int
+    abstainVotes : Int
+  where
+    signatory proposer
+    observer  voters
+
+    nonconsuming choice EvaluateQuorum : (Bool, Text)
+      controller proposer
+      do
+        let total        = length voters
+        let participating = forVotes + againstVotes + abstainVotes
+        let required     = (total * quorumPct + 99) / 100
+        let passed       = participating >= required && forVotes > againstVotes
+        let msg
+              | not passed && participating < required =
+                  "Quorum not reached: " <> show participating <> "/" <> show required <> " voted"
+              | not passed =
+                  "Vote failed: " <> show forVotes <> " for vs " <> show againstVotes <> " against"
+              | otherwise =
+                  "Passed: " <> show forVotes <> " for, " <> show againstVotes <> " against, quorum met"
+        return (passed, msg)
