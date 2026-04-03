@@ -1,0 +1,47 @@
+module Governance.Vote where
+
+import Governance.Proposal (VoteChoice(..))
+
+template Vote
+  with
+    proposalId : Text
+    voter      : Party
+    proposer   : Party
+    choice     : VoteChoice
+    castAt     : Time
+  where
+    signatory voter
+    observer  proposer
+
+    key (proposalId, voter) : (Text, Party)
+    maintainer key._2
+
+    choice ChangeVote : ContractId Vote
+      with newChoice : VoteChoice
+      controller voter
+      do
+        now <- getTime
+        create this with choice = newChoice; castAt = now
+
+    choice WithdrawVote : ()
+      controller voter
+      do return ()
+
+template VoteTally
+  with
+    proposalId  : Text
+    proposer    : Party
+    forCount    : Int
+    againstCount: Int
+    abstainCount: Int
+    totalVoters : Int
+    quorumPct   : Int
+  where
+    signatory proposer
+
+    nonconsuming choice IsQuorumReached : Bool
+      controller proposer
+      do
+        let participation = forCount + againstCount + abstainCount
+        let quorumThreshold = (totalVoters * quorumPct + 99) / 100
+        return (participation >= quorumThreshold && forCount > againstCount)
