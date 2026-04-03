@@ -1,0 +1,28 @@
+name: Canton Governance Toolkit CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Daml SDK
+        run: |
+          curl -sSL https://get.daml.com/ | sh -s 3.1.0
+          echo "$HOME/.daml/bin" >> $GITHUB_PATH
+
+      - name: Build Daml contracts
+        run: daml build
+
+      - name: Run governance lifecycle tests
+        run: daml test --color
+
+      - name: Verify SV example
+        run: daml test --files daml/examples/SVGovernance.daml --color
