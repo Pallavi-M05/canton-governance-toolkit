@@ -1,0 +1,43 @@
+module Governance.TimeLock where
+
+template TimeLock
+  with
+    proposalId    : Text
+    proposer      : Party
+    voters        : [Party]
+    payload       : Text
+    executeAfter  : Time
+    executeBefore : Time
+  where
+    signatory proposer
+    observer  voters
+
+    ensure executeAfter < executeBefore
+
+    choice Execute : ContractId ExecutionRecord
+      controller proposer
+      do
+        now <- getTime
+        assertMsg "Too early to execute — time-lock still active" (now >= executeAfter)
+        assertMsg "Execution window has expired"                  (now <= executeBefore)
+        create ExecutionRecord with
+          proposalId
+          proposer
+          payload
+          executedAt = now
+
+    choice CancelBeforeExecution : ()
+      controller proposer
+      do
+        now <- getTime
+        assertMsg "Cannot cancel after execution window has started" (now < executeAfter)
+        return ()
+
+template ExecutionRecord
+  with
+    proposalId : Text
+    proposer   : Party
+    payload    : Text
+    executedAt : Time
+  where
+    signatory proposer
