@@ -1,0 +1,57 @@
+module SVGovernance where
+
+-- Example: Super Validator (SV) group governance using the toolkit.
+-- An SV group uses this pattern to vote on protocol parameter changes.
+
+import Daml.Script
+import Governance.Proposal
+import Governance.Vote
+import Governance.Quorum
+import Governance.TimeLock
+
+sv_governance_example : Script ()
+sv_governance_example = script do
+  -- Five SV operators (Canton Network validators)
+  sv1 <- allocateParty "SV-Goldman"
+  sv2 <- allocateParty "SV-HSBC"
+  sv3 <- allocateParty "SV-BNP"
+  sv4 <- allocateParty "SV-Broadridge"
+  sv5 <- allocateParty "SV-Operator5"
+
+  let coordinator = sv1
+  now <- getTime
+
+  -- SV group proposes a protocol upgrade
+  proposalCid <- submit coordinator do
+    createCmd Proposal with
+      proposer       = coordinator
+      title          = "Upgrade Canton SDK to 3.2.0"
+      description    = "Adopt SDK 3.2.0 for performance improvements on the Global Synchroniser."
+      voters         = [sv1, sv2, sv3, sv4, sv5]
+      quorumPct      = 80
+      votingDeadline = addRelTime now (days 14)
+      payload        = "sdk_version=3.2.0"
+      guardian       = None
+
+  -- Four SVs vote in favour (80% quorum exactly met)
+  submit sv1 do exerciseCmd proposalCid CastVote with voter = sv1; choice = For
+  submit sv2 do exerciseCmd proposalCid CastVote with voter = sv2; choice = For
+  submit sv3 do exerciseCmd proposalCid CastVote with voter = sv3; choice = For
+  submit sv4 do exerciseCmd proposalCid CastVote with voter = sv4; choice = For
+  submit sv5 do exerciseCmd proposalCid CastVote with voter = sv5; choice = Against
+
+  -- Verify 80% quorum passed (4/5 For, 5/5 participation)
+  qcCid <- submit coordinator do
+    createCmd QuorumCheck with
+      proposalId   = "sv-upgrade-001"
+      proposer     = coordinator
+      voters       = [sv1, sv2, sv3, sv4, sv5]
+      quorumPct    = 80
+      forVotes     = 4
+      againstVotes = 1
+      abstainVotes = 0
+
+  (passed, msg) <- submit coordinator do exerciseCmd qcCid EvaluateQuorum
+  assertMsg ("SV quorum check: " <> msg) passed
+
+  return ()
