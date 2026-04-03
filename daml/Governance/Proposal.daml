@@ -1,0 +1,46 @@
+module Governance.Proposal where
+
+import DA.List (sortOn)
+
+data VoteChoice = For | Against | Abstain deriving (Eq, Show, Ord)
+
+data ProposalStatus = Open | Passed | Rejected | Vetoed | Executed | Cancelled
+  deriving (Eq, Show)
+
+template Proposal
+  with
+    proposer       : Party
+    title          : Text
+    description    : Text
+    voters         : [Party]
+    quorumPct      : Int
+    votingDeadline : Time
+    payload        : Text
+    guardian       : Optional Party
+  where
+    signatory proposer
+    observer  voters
+
+    ensure quorumPct > 0 && quorumPct <= 100
+    ensure title /= ""
+    ensure length voters > 0
+
+    choice CastVote : ContractId Proposal
+      with
+        voter  : Party
+        choice : VoteChoice
+      controller voter
+      do
+        assertMsg "Voter not in voter list" (voter `elem` voters)
+        now <- getTime
+        assertMsg "Voting deadline passed" (now < votingDeadline)
+        return self
+
+    choice FinaliseVoting : Either (ContractId Proposal) Text
+      controller proposer
+      do
+        return (Right "Use QuorumChecker to tally votes")
+
+    choice CancelProposal : ()
+      controller proposer
+      do return ()
