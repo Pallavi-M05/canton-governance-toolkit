@@ -1,0 +1,95 @@
+module GovernanceTest where
+
+import Daml.Script
+import Governance.Proposal
+import Governance.Vote
+import Governance.Quorum
+import Governance.TimeLock
+import Governance.Veto
+
+test_governance_lifecycle : Script ()
+test_governance_lifecycle = script do
+  proposer <- allocateParty "Treasury"
+  alice    <- allocateParty "Alice"
+  bob      <- allocateParty "Bob"
+  charlie  <- allocateParty "Charlie"
+  guardian <- allocateParty "Guardian"
+
+  now <- getTime
+
+  -- Create proposal
+  proposalCid <- submit proposer do
+    createCmd Proposal with
+      proposer
+      title          = "Increase fee buffer to 15%"
+      description    = "Network conditions warrant adjustment."
+      voters         = [alice, bob, charlie]
+      quorumPct      = 66
+      votingDeadline = addRelTime now (days 7)
+      payload        = "fee_buffer=0.15"
+      guardian       = Some guardian
+
+  -- All three vote
+  submit alice   do exerciseCmd proposalCid CastVote with voter = alice;   choice = For
+  submit bob     do exerciseCmd proposalCid CastVote with voter = bob;     choice = For
+  submit charlie do exerciseCmd proposalCid CastVote with voter = charlie; choice = Against
+
+  -- Evaluate quorum (2 for, 1 against, 3/3 participation → 66% quorum met, For wins)
+  qcCid <- submit proposer do
+    createCmd QuorumCheck with
+      proposalId   = "prop-001"
+      proposer
+      voters       = [alice, bob, charlie]
+      quorumPct    = 66
+      forVotes     = 2
+      againstVotes = 1
+      abstainVotes = 0
+
+  (passed, msg) <- submit proposer do
+    exerciseCmd qcCid EvaluateQuorum
+  assertMsg ("Expected quorum pass, got: " <> msg) passed
+
+  -- Create time-lock (execute window 1-2 days from now)
+  let executeAfter  = addRelTime now (days 1)
+  let executeBefore = addRelTime now (days 2)
+  lockCid <- submit proposer do
+    createCmd TimeLock with
+      proposalId    = "prop-001"
+      proposer
+      voters        = [alice, bob, charlie]
+      payload       = "fee_buffer=0.15"
+      executeAfter
+      executeBefore
+
+  -- Guardian grants veto right, then lets it expire
+  vetoCid <- submit guardian do
+    createCmd VetoRight with
+      proposalId   = "prop-001"
+      guardian
+      proposer
+      vetoDeadline = addRelTime now (hours 12)
+
+  return ()
+
+test_quorum_failure : Script ()
+test_quorum_failure = script do
+  proposer <- allocateParty "Proposer"
+  alice    <- allocateParty "Alice"
+  bob      <- allocateParty "Bob"
+  charlie  <- allocateParty "Charlie"
+  diana    <- allocateParty "Diana"
+
+  qcCid <- submit proposer do
+    createCmd QuorumCheck with
+      proposalId   = "prop-002"
+      proposer
+      voters       = [alice, bob, charlie, diana]
+      quorumPct    = 75
+      forVotes     = 1
+      againstVotes = 1
+      abstainVotes = 0
+
+  (passed, msg) <- submit proposer do exerciseCmd qcCid EvaluateQuorum
+  assertMsg "Expected quorum failure" (not passed)
+
+  return ()
