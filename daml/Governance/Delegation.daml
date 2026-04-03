@@ -1,0 +1,33 @@
+module Governance.Delegation where
+
+template VoteDelegation
+  with
+    delegator  : Party
+    delegate   : Party
+    proposer   : Party
+    validUntil : Time
+  where
+    signatory delegator
+    observer  delegate, proposer
+
+    key (delegator, proposer) : (Party, Party)
+    maintainer key._1
+
+    choice RevokeDelegation : ()
+      controller delegator
+      do return ()
+
+    choice ExtendDelegation : ContractId VoteDelegation
+      with newExpiry : Time
+      controller delegator
+      do
+        assertMsg "New expiry must be in the future" =<<
+          fmap (newExpiry >) getTime
+        create this with validUntil = newExpiry
+
+nonconsuming choice CheckDelegationActive : Bool
+  : ContractId VoteDelegation -> Update Bool
+  = \cid -> do
+      d <- fetch cid
+      now <- getTime
+      return (now <= d.validUntil)
