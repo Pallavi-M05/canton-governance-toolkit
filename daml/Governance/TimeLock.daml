@@ -27,11 +27,19 @@ template TimeLock
           executedAt = now
 
     choice CancelBeforeExecution : ()
+      with reason : Text
       controller proposer
       do
         now <- getTime
-        assertMsg "Cannot cancel after execution window has started" (now < executeAfter)
+        assertMsg "Cannot cancel: execution window has already opened" (now < executeAfter)
         return ()
+
+    choice ExtendExecutionWindow : ContractId TimeLock
+      with newExecuteBefore : Time
+      controller proposer
+      do
+        assertMsg "New deadline must be after current deadline" (newExecuteBefore > executeBefore)
+        create this with executeBefore = newExecuteBefore
 
 template ExecutionRecord
   with
