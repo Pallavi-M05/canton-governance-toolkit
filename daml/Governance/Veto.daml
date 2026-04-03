@@ -1,0 +1,42 @@
+module Governance.Veto where
+
+template VetoRight
+  with
+    proposalId  : Text
+    guardian    : Party
+    proposer    : Party
+    vetoDeadline: Time
+  where
+    signatory guardian
+    observer  proposer
+
+    choice ExerciseVeto : ContractId VetoRecord
+      with reason : Text
+      controller guardian
+      do
+        now <- getTime
+        assertMsg "Veto deadline has passed" (now <= vetoDeadline)
+        create VetoRecord with
+          proposalId
+          guardian
+          proposer
+          reason
+          vetoedAt = now
+
+    choice ExpireVetoRight : ()
+      controller proposer
+      do
+        now <- getTime
+        assertMsg "Veto window still open" (now > vetoDeadline)
+        return ()
+
+template VetoRecord
+  with
+    proposalId : Text
+    guardian   : Party
+    proposer   : Party
+    reason     : Text
+    vetoedAt   : Time
+  where
+    signatory guardian
+    observer  proposer
