@@ -1,10 +1,26 @@
 sdk-version: 3.1.0
 name: canton-governance-toolkit
-version: 0.3.0
+version: 0.1.0
 source: daml
-build-options:
-  - --target=2.1
 dependencies:
   - daml-prim
   - daml-stdlib
   - daml-script
+build-options:
+  - --target=2.1
+exposed-modules:
+  - Governance.Proposal
+  - Governance.Vote
+  - Governance.Role
+  - Governance.Timelock
+  - Governance.Delegate
+  - Governance.Config
+data-dependencies:
+  - .daml/dist/daml-stdlib-2.1.0.dar
+parties:
+  - Alice
+  - Bob
+  - Charlie
+  - Operator
+module-prefixes:
+  Governance: Governance
