@@ -1,47 +1,42 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
 module Governance.Vote where
 
-import Governance.Proposal (VoteChoice(..))
+import Daml.Trigger (Trigger)
+import DA.Set (Set)
+import qualified DA.Set as Set
 
+import Governance.Proposal (Proposal)
+
+-- | Represents the choice made in a vote.
+data VoteOption = For | Against | Abstain
+  deriving (Eq, Show, Ord)
+
+-- | A record of a single vote cast by a party for a specific proposal.
+-- This contract is created when a voter exercises the `Cast_Vote` choice on a `Proposal` contract.
+-- It is keyed to ensure that a voter can only cast one vote per proposal.
 template Vote
   with
-    proposalId : Text
-    voter      : Party
-    proposer   : Party
-    choice     : VoteChoice
-    castAt     : Time
+    proposalCid : ContractId Proposal
+      -- ^ The contract ID of the proposal being voted on.
+    voter : Party
+      -- ^ The party who cast this vote.
+    voteOption : VoteOption
+      -- ^ The choice made by the voter (For, Against, or Abstain).
+    weight : Decimal
+      -- ^ The weight of this vote. Useful for weighted voting systems. For a one-party-one-vote
+      -- system, this will be 1.0.
+    delegatedBy : Optional Party
+      -- ^ If this vote was cast by a delegate, this field contains the party who delegated
+      -- their vote. Otherwise, it is `None`.
   where
     signatory voter
-    observer  proposer
 
-    key (proposalId, voter) : (Text, Party)
+    -- To ensure all relevant parties to the proposal can see the votes, we fetch the proposal
+    -- and add its signatories and observers to this vote's observers.
+    proposal <- fetch proposalCid
+    observer signatory proposal, (observer proposal)
+
+    key (proposalCid, voter) : (ContractId Proposal, Party)
     maintainer key._2
-
-    choice ChangeVote : ContractId Vote
-      with newChoice : VoteChoice
-      controller voter
-      do
-        now <- getTime
-        create this with choice = newChoice; castAt = now
-
-    choice WithdrawVote : ()
-      controller voter
-      do return ()
-
-template VoteTally
-  with
-    proposalId  : Text
-    proposer    : Party
-    forCount    : Int
-    againstCount: Int
-    abstainCount: Int
-    totalVoters : Int
-    quorumPct   : Int
-  where
-    signatory proposer
-
-    nonconsuming choice IsQuorumReached : Bool
-      controller proposer
-      do
-        let participation = forCount + againstCount + abstainCount
-        let quorumThreshold = (totalVoters * quorumPct + 99) / 100
-        return (participation >= quorumThreshold && forCount > againstCount)
