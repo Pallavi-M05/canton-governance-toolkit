@@ -1,46 +1,84 @@
 module Governance.Proposal where
 
-import DA.List (sortOn)
+import DA.Time (Time)
 
-data VoteChoice = For | Against | Abstain deriving (Eq, Show, Ord)
+-- | Defines the possible states a proposal can be in throughout its lifecycle.
+data ProposalState =
+    Pending    -- ^ The proposal has been created but voting has not yet started.
+  | Voting     -- ^ The proposal is actively accepting votes.
+  | Succeeded  -- ^ The voting period has ended and the proposal passed the quorum.
+  | Failed     -- ^ The voting period has ended and the proposal did not pass the quorum.
+  | Executed   -- ^ The proposal's payload has been successfully executed.
+  | Vetoed     -- ^ The proposal was cancelled by a party with veto rights.
+  deriving (Eq, Show, Ord)
 
-data ProposalStatus = Open | Passed | Rejected | Vetoed | Executed | Cancelled
-  deriving (Eq, Show)
 
+-- | Represents a governance proposal that can be voted on and executed on-chain.
+-- The payload is a generic `AnyChoice`, allowing this template to be used for
+-- governing any action on any other contract. This template holds the core data
+-- and state of the proposal. Other templates, like `Vote`, will interact with it.
 template Proposal
   with
-    proposer       : Party
-    title          : Text
-    description    : Text
-    voters         : [Party]
-    quorumPct      : Int
-    votingDeadline : Time
-    payload        : Text
-    guardian       : Optional Party
+    proposer : Party
+      -- ^ The party who submitted the proposal.
+    title : Text
+      -- ^ A short, unique title for the proposal. Used in the contract key.
+    description : Text
+      -- ^ A detailed description of the proposal's purpose and effect.
+    voters : [Party]
+      -- ^ The list of parties eligible to vote on this proposal.
+    vetoers : [Party]
+      -- ^ The list of parties who have the right to veto this proposal.
+    quorumThreshold : Int
+      -- ^ The minimum number of 'Yes' votes required for the proposal to pass.
+    payload : AnyChoice
+      -- ^ The on-chain action to be executed if the proposal is successful.
+    votingStartsAt : Time
+      -- ^ The timestamp when the voting period begins.
+    votingEndsAt : Time
+      -- ^ The timestamp when the voting period ends.
+    state : ProposalState
+      -- ^ The current state of the proposal in its lifecycle.
+
   where
     signatory proposer
-    observer  voters
+    observer voters, vetoers
 
-    ensure quorumPct > 0 && quorumPct <= 100
-    ensure title /= ""
-    ensure length voters > 0
+    ensure
+      -- The voting window must be valid.
+      votingStartsAt < votingEndsAt &&
+      -- The quorum must be a positive number.
+      quorumThreshold > 0 &&
+      -- The quorum cannot be greater than the total number of possible voters.
+      quorumThreshold <= length voters
 
-    choice CastVote : ContractId Proposal
+    key (proposer, title) : (Party, Text)
+    maintainer key._1
+
+    -- | Transition the proposal from 'Pending' to 'Voting' state.
+    -- This must be done at or after the `votingStartsAt` time. Exercising this
+    -- choice archives the `Pending` proposal and creates a new one in the
+    -- `Voting` state.
+    choice StartVoting : ContractId Proposal
       with
-        voter  : Party
-        choice : VoteChoice
-      controller voter
-      do
-        assertMsg "Voter not in voter list" (voter `elem` voters)
-        now <- getTime
-        assertMsg "Voting deadline passed" (now < votingDeadline)
-        return self
-
-    choice FinaliseVoting : Either (ContractId Proposal) Text
+        currentTime : Time
+          -- ^ The current ledger time, used to validate the transition.
       controller proposer
       do
-        return (Right "Use QuorumChecker to tally votes")
+        assertMsg "Proposal must be in 'Pending' state to start voting"
+          (state == Pending)
+        assertMsg "Voting cannot start before its designated start time"
+          (currentTime >= votingStartsAt)
 
-    choice CancelProposal : ()
-      controller proposer
-      do return ()
+        create this with state = Voting
+
+    -- | Allows a designated party to veto the proposal, stopping it from proceeding.
+    -- A proposal can be vetoed at any stage before it is executed. Exercising
+    -- this choice archives the current proposal and creates a new one in the
+    -- `Vetoed` state.
+    choice Veto : ContractId Proposal
+      controller vetoers
+      do
+        assertMsg "Proposal has already been executed or vetoed, and cannot be vetoed again"
+          (state `elem` [Pending, Voting, Succeeded])
+        create this with state = Vetoed
