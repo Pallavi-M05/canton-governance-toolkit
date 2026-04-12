@@ -1,30 +1,99 @@
 module Governance.Quorum where
 
-template QuorumCheck
-  with
-    proposalId   : Text
-    proposer     : Party
-    voters       : [Party]
-    quorumPct    : Int
-    forVotes     : Int
-    againstVotes : Int
-    abstainVotes : Int
-  where
-    signatory proposer
-    observer  voters
+import DA.Assert
+import DA.Set (Set)
+import DA.Set qualified as Set (size)
+import DA.Map (Map)
+import DA.Map qualified as Map (size)
+import DA.Math qualified as Math (ceiling)
+import DA.Internal.Prelude (intToDecimal)
 
-    nonconsuming choice EvaluateQuorum : (Bool, Text)
-      controller proposer
-      do
-        let total        = length voters
-        let participating = forVotes + againstVotes + abstainVotes
-        let required     = (total * quorumPct + 99) / 100
-        let passed       = participating >= required && forVotes > againstVotes
-        let msg
-              | not passed && participating < required =
-                  "Quorum not reached: " <> show participating <> "/" <> show required <> " voted"
-              | not passed =
-                  "Vote failed: " <> show forVotes <> " for vs " <> show againstVotes <> " against"
-              | otherwise =
-                  "Passed: " <> show forVotes <> " for, " <> show againstVotes <> " against, quorum met"
-        return (passed, msg)
+
+-- | Defines the quorum requirement for a proposal.
+-- The threshold represents the minimum percentage of eligible voters
+-- that must participate for the vote to be considered valid.
+data QuorumSetting = QuorumSetting
+  with
+    -- | A value between 0.0 and 1.0, inclusive. E.g., 0.4 for a 40% quorum.
+    threshold : Decimal
+  deriving (Eq, Show)
+
+-- | Represents the outcome of a quorum check, providing detailed information
+-- on whether the participation threshold was met.
+data QuorumResult
+  = -- | The quorum was successfully met.
+    QuorumMet with
+      votesCast      : Int     -- ^ The number of unique votes cast.
+      eligibleVoters : Int     -- ^ The total number of eligible voters.
+      threshold      : Decimal -- ^ The required quorum threshold percentage.
+  | -- | The quorum was not met.
+    QuorumNotMet with
+      votesCast      : Int     -- ^ The number of unique votes cast.
+      eligibleVoters : Int     -- ^ The total number of eligible voters.
+      requiredVotes  : Int     -- ^ The minimum number of votes that were required.
+      threshold      : Decimal -- ^ The required quorum threshold percentage.
+  deriving (Eq, Show)
+
+
+-- | Calculates the minimum number of votes required to meet a quorum,
+-- based on a percentage threshold of the total eligible voter pool.
+-- The result is always rounded up to the nearest whole number.
+calculateRequiredVotes :
+  QuorumSetting -> -- ^ The quorum settings defining the threshold.
+  Int ->           -- ^ The total number of eligible voters.
+  Int              -- ^ The minimum number of votes required (rounded up).
+calculateRequiredVotes setting totalEligibleVoters =
+  let
+    _ = assertMsg "Quorum threshold must be between 0.0 and 1.0"
+          (setting.threshold >= 0.0 && setting.threshold <= 1.0)
+
+    requiredDecimal = setting.threshold * (intToDecimal totalEligibleVoters)
+    -- Participation is measured in whole voters, so we round up to ensure
+    -- the threshold is strictly met or exceeded. E.g., 10.1 required votes -> 11.
+    requiredCount = Math.ceiling requiredDecimal
+  in
+    requiredCount
+
+
+-- | Checks if the number of cast votes meets the quorum requirement.
+-- It takes the votes as a Map to ensure each voter is only counted once.
+--
+-- This is the primary function for evaluating quorum status.
+checkQuorum :
+  QuorumSetting ->     -- ^ The quorum settings for the proposal.
+  Set Party ->         -- ^ The set of all parties eligible to vote.
+  Map Party a ->       -- ^ A map of votes cast, where keys are voters.
+                       --   The value `a` can be any type, as only keys are counted.
+  QuorumResult
+checkQuorum setting eligibleVoters votes =
+  let
+    numEligible = Set.size eligibleVoters
+    numVotesCast = Map.size votes
+    required = calculateRequiredVotes setting numEligible
+
+    isMet = numVotesCast >= required
+  in
+    if isMet then
+      QuorumMet with
+        votesCast = numVotesCast
+        eligibleVoters = numEligible
+        threshold = setting.threshold
+    else
+      QuorumNotMet with
+        votesCast = numVotesCast
+        eligibleVoters = numEligible
+        requiredVotes = required
+        threshold = setting.threshold
+
+
+-- | A convenience helper that returns a simple `Bool` indicating if quorum is met.
+-- This is useful for guard clauses and simple checks within choices.
+isQuorumMet :
+  QuorumSetting ->     -- ^ The quorum settings for the proposal.
+  Set Party ->         -- ^ The set of all parties eligible to vote.
+  Map Party a ->       -- ^ A map of votes cast.
+  Bool
+isQuorumMet setting eligibleVoters votes =
+  case checkQuorum setting eligibleVoters votes of
+    QuorumMet {} -> True
+    QuorumNotMet {} -> False
