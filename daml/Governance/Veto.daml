@@ -1,42 +1,75 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
 module Governance.Veto where
 
+import DA.Set (Set)
+import qualified DA.Set as Set
+import Governance.TimeLock (TimeLock)
+import qualified Governance.TimeLock as TimeLock
+
+-- | Represents the right for a set of guardians to veto a proposal's execution
+-- during its time-lock period.
+-- This contract is typically created when a proposal passes and enters the
+-- time-lock phase. If the required number of guardians exercise their veto,
+-- the associated `TimeLock` contract is archived, preventing execution.
+-- The `VetoRight` contract should be cleaned up (archived) by the same process
+-- that executes or expires the `TimeLock` contract it is associated with.
 template VetoRight
   with
-    proposalId  : Text
-    guardian    : Party
-    proposer    : Party
-    vetoDeadline: Time
-  where
-    signatory guardian
-    observer  proposer
-
-    choice ExerciseVeto : ContractId VetoRecord
-      with reason : Text
-      controller guardian
-      do
-        now <- getTime
-        assertMsg "Veto deadline has passed" (now <= vetoDeadline)
-        create VetoRecord with
-          proposalId
-          guardian
-          proposer
-          reason
-          vetoedAt = now
-
-    choice ExpireVetoRight : ()
-      controller proposer
-      do
-        now <- getTime
-        assertMsg "Veto window still open" (now > vetoDeadline)
-        return ()
-
-template VetoRecord
-  with
+    operator : Party
+      -- ^ The operator of the governance framework.
+    guardians : Set Party
+      -- ^ The set of parties who can exercise a veto.
+    vetoThreshold : Int
+      -- ^ The number of guardian votes required to successfully veto.
     proposalId : Text
-    guardian   : Party
-    proposer   : Party
-    reason     : Text
-    vetoedAt   : Time
+      -- ^ A unique identifier for the proposal this veto right pertains to.
+    timeLockCid : ContractId TimeLock
+      -- ^ The `TimeLock` contract that will be archived if the veto succeeds.
+    proposer : Party
+      -- ^ The original proposer of the proposal, for observation.
+    votedGuardians : Set Party
+      -- ^ The set of guardians who have already cast their veto vote.
   where
-    signatory guardian
-    observer  proposer
+    signatory operator
+    observer proposer, Set.toList guardians
+
+    key (operator, proposalId) : (Party, Text)
+    maintainer key._1
+
+    ensure
+      vetoThreshold > 0 &&
+      vetoThreshold <= Set.size guardians &&
+      Set.size votedGuardians < vetoThreshold
+
+    choice ExerciseVeto : Optional (ContractId VetoRight)
+      -- ^ A guardian casts their vote to veto the proposal.
+      -- If the vote meets the `vetoThreshold`, the `TimeLock` is archived and
+      -- this contract is consumed, returning `None`.
+      -- If the threshold is not met, the contract is updated with the new voter
+      -- and the `ContractId` of the new `VetoRight` contract is returned as `Some cid`.
+      with
+        actingGuardian : Party
+          -- ^ The guardian exercising the veto.
+      controller actingGuardian
+      do
+        assertMsg "Veto can only be exercised by a designated guardian." $
+          Set.member actingGuardian guardians
+        assertMsg "Guardian has already cast their veto vote." $
+          not $ Set.member actingGuardian votedGuardians
+
+        let newVotedGuardians = Set.insert actingGuardian votedGuardians
+        let newVoteCount = Set.size newVotedGuardians
+
+        if newVoteCount >= vetoThreshold
+          then do
+            -- Veto threshold met. Archive the time-lock to prevent execution.
+            -- This assumes the `TimeLock` template has an `Archive` choice
+            -- controllable by the guardians.
+            exercise timeLockCid TimeLock.Archive with reason = "Proposal vetoed by guardians."
+            pure None
+          else do
+            -- Veto threshold not yet met. Recreate the contract with the updated voter set.
+            newCid <- create this with votedGuardians = newVotedGuardians
+            pure $ Some newCid
