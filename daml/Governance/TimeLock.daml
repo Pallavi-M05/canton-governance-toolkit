@@ -1,51 +1,211 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
 module Governance.TimeLock where
 
+import Daml.Script
+
+import DA.Set (Set)
+import qualified DA.Set as Set
+import DA.Time
+
+import Governance.Proposal (Proposal(..))
+
+-- Used for creating 'Any' values in scripts
+import DA.Internal.LF (object, (.=))
+
+-- | Represents a proposal that has successfully passed its vote and is now in a
+-- | mandatory waiting period before it can be executed. This "time-lock" provides
+-- | a window for stakeholders to react, prepare for the consequences of the
+-- | proposal, or potentially exercise emergency veto rights (if implemented).
+-- | Execution is only possible within a defined time window after the lock expires.
 template TimeLock
   with
-    proposalId    : Text
-    proposer      : Party
-    voters        : [Party]
-    payload       : Text
-    executeAfter  : Time
-    executeBefore : Time
+    proposalData : Proposal
+      -- ^ The full data of the original proposal. Embedding this makes the
+      -- ^ `TimeLock` contract self-contained and auditable.
+    executor     : Party
+      -- ^ The party authorized to trigger the execution of the proposal's payload.
+      -- ^ This is often the proposer or a dedicated governance multisig wallet.
+    voters       : Set Party
+      -- ^ The set of parties whose votes led to the proposal passing. They are the
+      -- ^ signatories on this contract, as they collectively authorized this
+      -- ^ future, time-locked action.
+    executionWindowStart : Time
+      -- ^ The timestamp at which the time-lock expires and the execution
+      -- ^ window opens.
+    executionWindowEnd   : Time
+      -- ^ The timestamp at which the execution window closes. If the proposal is
+      -- ^ not executed by this time, it expires permanently.
   where
-    signatory proposer
-    observer  voters
+    signatory voters
+    observer executor, proposalData.proposer
 
-    ensure executeAfter < executeBefore
+    -- Pre-conditions to ensure the TimeLock is valid upon creation.
+    ensure executionWindowStart < executionWindowEnd
+      -- The start of the execution window must be before the end.
 
-    choice Execute : ContractId ExecutionRecord
-      controller proposer
+    -- The unique key is derived from the proposal, ensuring only one active
+    -- time-lock exists for any given proposal.
+    key (proposalData.proposer, proposalData.proposalId) : (Party, Text)
+    maintainer key._1
+
+    -- | Executes the command defined in the proposal's payload.
+    -- |
+    -- | This choice can only be exercised by the designated `executor` and only
+    -- | within the active execution window. The action is submitted to the
+    -- | ledger with the authority of the original `proposer`, as authorized by
+    -- | the `voters` who are signatories on this contract.
+    choice Execute : ContractId Any
+      controller executor
       do
         now <- getTime
-        assertMsg "Too early to execute — time-lock still active" (now >= executeAfter)
-        assertMsg "Execution window has expired"                  (now <= executeBefore)
-        create ExecutionRecord with
-          proposalId
-          proposer
-          payload
-          executedAt = now
+        assertMsg
+          ("Execution attempted at " <> show now <> ", but window only opens at " <> show executionWindowStart)
+          (now >= executionWindowStart)
+        assertMsg
+          ("Execution window closed at " <> show executionWindowEnd <> ", attempted at " <> show now)
+          (now <= executionWindowEnd)
 
-    choice CancelBeforeExecution : ()
-      with reason : Text
-      controller proposer
+        -- This is the core of the governance action. The voters, by signing this
+        -- contract, have delegated the authority to the `executor` to submit the
+        -- proposer's intended command. The command is submitted `as` the proposer.
+        submit proposalData.proposer do
+          exerciseCmd proposalData.payloadCid proposalData.payloadChoice with
+            arg = proposalData.payloadArgument
+
+    -- | Archives the `TimeLock` if it was not executed before its window closed.
+    -- | This is a cleanup mechanism to ensure expired proposals don't remain on
+    -- | the ledger indefinitely. It can be called by anyone involved after the
+    -- | window has passed.
+    choice Expire : ()
+      controller executor, proposalData.proposer
       do
         now <- getTime
-        assertMsg "Cannot cancel: execution window has already opened" (now < executeAfter)
+        assertMsg
+          ("Cannot expire the proposal before its execution window closes at " <> show executionWindowEnd)
+          (now > executionWindowEnd)
         return ()
 
-    choice ExtendExecutionWindow : ContractId TimeLock
-      with newExecuteBefore : Time
-      controller proposer
-      do
-        assertMsg "New deadline must be after current deadline" (newExecuteBefore > executeBefore)
-        create this with executeBefore = newExecuteBefore
+-- === Scenarios for testing and demonstration ===
+--
+-- These scenarios demonstrate the lifecycle of a `TimeLock` contract.
 
-template ExecutionRecord
+-- | A simple contract to act as a target for a governance proposal.
+template DummyPayload
   with
-    proposalId : Text
-    proposer   : Party
-    payload    : Text
-    executedAt : Time
+    owner: Party
+    value: Int
   where
-    signatory proposer
+    signatory owner
+    key owner: Party
+    maintainer key
+
+    choice UpdateValue : ContractId DummyPayload
+      with
+        newValue : Int
+      controller owner
+      do create this with value = newValue
+
+setupTimeLockTest : Script (Party, Party, ContractId TimeLock)
+setupTimeLockTest = script do
+  proposer <- allocatePartyWithHint "Proposer" (PartyIdHint "proposer")
+  executor <- allocatePartyWithHint "Executor" (PartyIdHint "executor")
+  voter1   <- allocatePartyWithHint "Voter1" (PartyIdHint "voter1")
+  voter2   <- allocatePartyWithHint "Voter2" (PartyIdHint "voter2")
+
+  -- 1. Create a dummy payload contract that the proposal will act upon.
+  payloadCid <- submit proposer do
+    createCmd DummyPayload with owner = proposer, value = 100
+
+  -- 2. Define the proposal data.
+  now <- getTime
+  let
+    proposal = Proposal with
+      proposer = proposer
+      proposalId = "PROP-001-TIMELOCK"
+      description = "Update the value in DummyPayload via TimeLock"
+      payloadCid = toInterfaceContractId payloadCid
+      payloadChoice = "UpdateValue"
+      payloadArgument = object ["newValue" .= (200: Int)]
+
+    voters = Set.fromList [voter1, voter2]
+    -- Time-lock starts now, opens for execution in 1 day.
+    startTime = addRelTime now (days 1)
+    -- Execution window closes 3 days from now.
+    endTime = addRelTime now (days 3)
+
+  -- 3. Create the TimeLock contract. In a real flow, this would be created by
+  --    a `TallyVotes` choice on a `Vote` contract. Here we create it directly
+  --    with the authority of the voters.
+  timeLockCid <- submitMulti (Set.toList voters) [] do
+    createCmd TimeLock with
+      proposalData = proposal
+      executor = executor
+      voters = voters
+      executionWindowStart = startTime
+      executionWindowEnd = endTime
+
+  return (proposer, executor, timeLockCid)
+
+testFullLifecycle : Script ()
+testFullLifecycle = script do
+  (proposer, executor, timeLockCid) <- setupTimeLockTest
+
+  -- === 1. Verify initial state ===
+  Some payload <- queryContractKey @DummyPayload proposer proposer
+  payload.value === 100
+  Some timeLock <- queryContractId @TimeLock executor timeLockCid
+  timeLock.executor === executor
+
+  -- === 2. Attempt to execute before the window opens (should fail) ===
+  submitMustFail executor do
+    exerciseCmd timeLockCid Execute
+
+  -- === 3. Advance time to be within the execution window and execute ===
+  passTime (days 2)
+  now <- getTime
+  Some timeLock' <- queryContractId @TimeLock executor timeLockCid
+  assert (now >= timeLock'.executionWindowStart && now <= timeLock'.executionWindowEnd)
+
+  -- Execute the proposal (should succeed).
+  submit executor do
+    exerciseCmd timeLockCid Execute
+
+  -- === 4. Verify post-execution state ===
+  -- The TimeLock contract should be consumed.
+  queryContractId @TimeLock executor timeLockCid === None
+
+  -- The payload contract should be updated.
+  Some updatedPayload <- queryContractKey @DummyPayload proposer proposer
+  updatedPayload.value === 200
+
+  return ()
+
+testExpiration : Script ()
+testExpiration = script do
+  (proposer, executor, timeLockCid) <- setupTimeLockTest
+
+  -- === 1. Advance time to be after the execution window has closed ===
+  passTime (days 4)
+  now <- getTime
+  Some timeLock <- queryContractId @TimeLock executor timeLockCid
+  assert (now > timeLock.executionWindowEnd)
+
+  -- === 2. Attempt to execute (should fail as it's too late) ===
+  submitMustFail executor do
+    exerciseCmd timeLockCid Execute
+
+  -- === 3. Expire the contract (should succeed) ===
+  submit executor do
+    exerciseCmd timeLockCid Expire
+
+  -- === 4. Verify post-expiration state ===
+  -- The TimeLock contract should be consumed.
+  queryContractId @TimeLock executor timeLockCid === None
+
+  -- The payload contract should NOT have been updated.
+  Some payload <- queryContractKey @DummyPayload proposer proposer
+  payload.value === 100
+
+  return ()
